@@ -26,7 +26,8 @@ register_amd_ci(est_time=302, stage="stage-b", runner_config="1-gpu-small-amd")
 
 class TestDFlashServerBase(CustomTestCase, MatchedStopMixin, GSM8KMixin):
     max_running_requests = 64
-    attention_backend = "triton" if is_hip() else "flashinfer"
+    attention_backend = "triton" if is_hip() else "fa3"
+    draft_attention_backend = "triton" if is_hip() else "fa3"
     page_size = 1
     other_launch_args = []
     # Base classes exercise the non-overlap (synchronous) scheduling path.
@@ -48,6 +49,8 @@ class TestDFlashServerBase(CustomTestCase, MatchedStopMixin, GSM8KMixin):
             "DFLASH",
             "--speculative-draft-model-path",
             cls.draft_model,
+            "--speculative-draft-attention-backend",
+            cls.draft_attention_backend,
             "--page-size",
             str(cls.page_size),
             "--max-running-requests",
