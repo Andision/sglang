@@ -20,6 +20,10 @@ from sglang.srt.layers.moe.token_dispatcher.flashinfer_utils import (
 )
 from sglang.srt.layers.moe.topk import StandardTopKOutput, TopKOutput
 from sglang.srt.layers.moe.utils import get_moe_runner_backend
+from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph.context import (
+    is_in_breakable_cuda_graph,
+)
+from sglang.srt.model_executor.runner_utils.capture_mode import get_is_capture_mode
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import get_int_env_var
@@ -206,12 +210,19 @@ class FlashinferDispatcher(BaseDispatcher):
         payloads.append(topk_ids)
         payloads.append(topk_weights)
 
+        server_args = get_global_server_args()
+        is_graph_capture = get_is_capture_mode() or is_in_breakable_cuda_graph()
+
         dp_global = get_dp_global_num_tokens()
         if dp_global is not None and len(dp_global) > 1:
             # DP attention: multiple DP ranks with different token counts.
             # Use the max across ranks so the A2A workspace fits the fattest.
             self.runtime_max_tokens_per_rank = max(dp_global)
-        elif self.ep_size > 1 and not require_mlp_tp_gather(get_global_server_args()):
+        elif (
+            self.ep_size > 1
+            and not is_graph_capture
+            and not require_mlp_tp_gather(server_args)
+        ):
             # require_mlp_tp_gather is False, so the scheduler collapsed
             # global_num_tokens to the local count; x.shape[0] then differs
             # across EP ranks and breaks the fixed-geometry MoeAlltoAll. Use
