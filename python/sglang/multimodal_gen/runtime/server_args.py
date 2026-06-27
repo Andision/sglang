@@ -734,9 +734,7 @@ class ServerArgs(DisaggServerArgsMixin):
                 # ``serve --warmup`` would *downgrade* the production
                 # server-warmup default to request mode. (``--warmup false``
                 # keeps self.warmup False here and is left untouched.)
-                self.server_warmup = (
-                    self.server_warmup or self.warmup_mode == "server"
-                )
+                self.server_warmup = self.server_warmup or self.warmup_mode == "server"
 
         # Explicit resolutions imply warmup is on (request-based).
         if self.warmup_resolutions is not None:
