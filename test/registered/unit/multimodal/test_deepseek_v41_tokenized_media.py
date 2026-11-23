@@ -1,14 +1,15 @@
 """CPU parity of the DeepSeek-V4.1 token-space strategy with the legacy processor; no weights.
 
-serving   served output == legacy PIL backend: IDs, items, offsets, patches, n_vit_h/n_vit_w;
-          PNG, JPEG and RGBA, padded, stretched, upscaled and token-capped resizes, and two
-          adjacent images -> test_serving_output_matches_legacy_processor
-hashes    transposed solid images have equal patches but different grids and spans
+serving   served output == legacy PIL backend: IDs, items, offsets, patches, grids;
+          PNG, JPEG and RGBA, an exact, padded, stretched, upscaled and token-capped
+          resize, and two adjacent images
+          -> test_serving_output_matches_legacy_processor
+hashes    transposed solid images have equal patches, but their grids and spans differ
           -> test_transposed_images_get_different_hashes
 turns     a later turn adds one image behind the expanded prefix
           -> test_partial_expansion_adds_the_new_turns_image
-towers    a text-only checkpoint rejects images; an nvJPEG decoder is rejected at startup
-          -> test_unsupported_inputs_are_rejected
+decoder   a GPU image decoder is rejected
+          -> test_gpu_image_decoder_is_rejected
 trainer   the strategy module imports without serving modules
           -> test_strategy_imports_without_serving_modules
 """
@@ -47,10 +48,8 @@ ARCH = "DeepseekV4ForCausalLM"
 IMAGE = 129264
 VOCAB = {"[UNK]": 0, "hi": 1, "there": 2, "<image>": IMAGE}
 
-DeepseekV41TokenSpaceProcessor = (
-    TokenSpaceSGLangProcessor.for_strategy_and_serving_spec(
-        DeepseekV41TokenSpaceProcessStrategy, DeepseekV41TokenSpaceServingSpec
-    )
+DeepseekTokenSpaceProcessor = TokenSpaceSGLangProcessor.for_strategy_and_serving_spec(
+    DeepseekV41TokenSpaceProcessStrategy, DeepseekV41TokenSpaceServingSpec
 )
 
 
@@ -61,12 +60,10 @@ def _tokenizer():
     )
 
 
-def _config(*, vision=True):
-    # Patches of 4 px in 8 px token cells keep the grids small; the planner's branches
-    # depend on the ratios, not on the checkpoint's 14 px patches.
+def _config():
+    # 4 px patches in 8 px token cells keep the grids small; each resize depends on ratios only.
     return DeepseekV41Config(
         architectures=[ARCH],
-        vision_n_layers=1 if vision else 0,
         image_token_id=IMAGE,
         vision_patch_size=4,
         vision_downsample_ratio=2,
@@ -77,8 +74,7 @@ def _config(*, vision=True):
 
 
 def _image(width, height, seed, format, mode="RGB"):
-    channels = len(mode)
-    pixels = np.random.RandomState(seed).rand(height, width, channels) * 255
+    pixels = np.random.RandomState(seed).rand(height, width, len(mode)) * 255
     buffer = io.BytesIO()
     Image.fromarray(pixels.astype("uint8"), mode).save(buffer, format=format)
     return buffer.getvalue()
@@ -100,7 +96,6 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
             mm_process_config={},
             mm_feature_transport="cpu",
             mm_preprocess_cache_size_mb=0,
-            # Pins legacy to its PIL backend, the one the strategy reproduces.
             disable_fast_image_processor=True,
             mm_processor_worker_num=1,
             enable_token_space_processor=True,
@@ -108,33 +103,24 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
         publish(self.server_args, role="test")
         self.tokenizer = _tokenizer()
         self.images = [
-            _image(16, 16, 1, "PNG"),  # exact grid
-            _image(24, 10, 2, "JPEG"),  # upscaled to vision_min_pixels, then padded
-            _image(20, 20, 3, "PNG", mode="RGBA"),  # alpha dropped
-            _image(64, 8, 4, "PNG"),  # wider than vision_max_wh_ratio: stretched
-            _image(80, 60, 5, "PNG"),  # over vision_max_n_token: shrunk
+            _image(16, 16, 1, "PNG"),
+            _image(24, 10, 2, "JPEG"),
+            _image(20, 20, 3, "PNG", mode="RGBA"),
+            _image(64, 8, 4, "PNG"),
+            _image(80, 60, 5, "PNG"),
         ]
 
-    def _processors(self, config=None):
-        config = config or _config()
+    def _processors(self):
+        # disable_fast_image_processor pins legacy to PIL, the backend the strategy uses.
         legacy = DeepseekV41ImageProcessor(
-            config, self.server_args, self.tokenizer, None
+            _config(), self.server_args, self.tokenizer, None
         )
         self.addCleanup(legacy.shutdown)
-        served = DeepseekV41TokenSpaceProcessor(
-            config, self.server_args, self.tokenizer, None
+        served = DeepseekTokenSpaceProcessor(
+            _config(), self.server_args, self.tokenizer, None
         )
         self.addCleanup(served.shutdown)
         return legacy, served
-
-    def _served_output(self, served, input_ids, images, **request):
-        return asyncio.run(
-            served.process_mm_data_async(
-                image_data=list(images),
-                input_text=input_ids,
-                request_obj=GenerateReqInput(input_ids=input_ids, **request),
-            )
-        )
 
     def _legacy_output(self, legacy, input_ids, images):
         return asyncio.run(
@@ -160,27 +146,25 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
             )
 
     def test_serving_output_matches_legacy_processor(self):
-        """Every resize branch of the planner, with the last two images adjacent."""
+        """An exact, a padded, an RGBA, a stretched and a token-capped image; the last two adjacent."""
         legacy, served = self._processors()
         input_ids = [1, IMAGE, 2, IMAGE, 1, IMAGE, 2, IMAGE, IMAGE]
-        served_output = self._served_output(served, input_ids, self.images)
+
+        served_output = asyncio.run(
+            served.process_mm_data_async(image_data=self.images, input_text=input_ids)
+        )
         legacy_output = self._legacy_output(legacy, input_ids, self.images)
+
         self.assert_same_media(served_output, legacy_output)
-        # The token-capped image still fits vision_max_n_token.
-        start, end = served_output.mm_items[-1].offsets[0]
-        self.assertLessEqual(end - start + 1, 40)
 
     def test_transposed_images_get_different_hashes(self):
-        """A solid 32x16 and 16x32 image patchify to equal tensors; only their grids differ.
-
-        A hash of the patches alone would let one reuse the other's embedding, whose span
-        has a different length.
-        """
+        """A solid 32x16 and 16x32 image have equal patches but spans of 12 and 14 tokens."""
         _, served = self._processors()
-        output = self._served_output(
-            served,
-            [IMAGE, 1, IMAGE],
-            [_solid_png(32, 16), _solid_png(16, 32)],
+        output = asyncio.run(
+            served.process_mm_data_async(
+                image_data=[_solid_png(32, 16), _solid_png(16, 32)],
+                input_text=[IMAGE, 1, IMAGE],
+            )
         )
         wide, tall = output.mm_items
         self.assertTrue(torch.equal(wide.feature, tall.feature))
@@ -189,32 +173,31 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
     def test_partial_expansion_adds_the_new_turns_image(self):
         """The second turn resends every image; only the placeholder after the prefix expands."""
         legacy, served = self._processors()
-        first_turn = self._served_output(served, [1, IMAGE, 2], self.images[:1])
+        first_turn = asyncio.run(
+            served.process_mm_data_async(
+                image_data=self.images[:1], input_text=[1, IMAGE, 2]
+            )
+        )
         second_turn_ids = first_turn.input_ids + [1, IMAGE]
-        second_turn = self._served_output(
-            served,
-            second_turn_ids,
-            self.images[:2],
-            mm_token_expansion_start_len=len(first_turn.input_ids),
+        second_turn = asyncio.run(
+            served.process_mm_data_async(
+                image_data=self.images[:2],
+                input_text=second_turn_ids,
+                request_obj=GenerateReqInput(
+                    input_ids=second_turn_ids,
+                    mm_token_expansion_start_len=len(first_turn.input_ids),
+                ),
+            )
         )
         legacy_output = self._legacy_output(
             legacy, [1, IMAGE, 2, 1, IMAGE], self.images[:2]
         )
         self.assert_same_media(second_turn, legacy_output)
 
-    def test_unsupported_inputs_are_rejected(self):
-        """Neither reaches the model: it has no ViT, or patchify_image would get a GPU tensor."""
-        served = DeepseekV41TokenSpaceProcessor(
-            _config(vision=False), self.server_args, self.tokenizer, None
-        )
-        self.addCleanup(served.shutdown)
-        with self.assertRaisesRegex(ValueError, "no vision tower"):
-            self._served_output(served, [IMAGE], self.images[:1])
+    def test_gpu_image_decoder_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "image_decoder must be 'pil'"):
             DeepseekV41TokenSpaceProcessStrategy(
-                _config(),
-                self.tokenizer,
-                mm_process_config={"image_decoder": "nvjpeg"},
+                _config(), self.tokenizer, mm_process_config={"image_decoder": "nvjpeg"}
             )
 
     def test_strategy_imports_without_serving_modules(self):

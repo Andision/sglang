@@ -651,7 +651,6 @@ class TestTokenSpaceSGLangProcessor(unittest.TestCase):
     def test_strategies_keep_the_legacy_processor_defaults(self):
         """A token-space model loads and schedules media like the legacy processor it replaces,
         except the alpha compositing `_STRATEGY_RGB_CONVERSION` records for it."""
-        # Some legacy processors read the mm config before reaching the shared base.
         reset_context()
         self.addCleanup(reset_context)
         publish(ServerArgs(model_path="dummy", model_impl="sglang"), role="test")
