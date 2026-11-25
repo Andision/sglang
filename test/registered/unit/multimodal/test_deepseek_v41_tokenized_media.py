@@ -8,6 +8,8 @@ hashes    transposed solid images have equal patches, but their grids and spans 
           -> test_transposed_images_get_different_hashes
 turns     a later turn adds one image behind the expanded prefix
           -> test_partial_expansion_adds_the_new_turns_image
+mrope     the scheduler's M-RoPE fallback returns none for two images instead of crashing
+          -> test_scheduler_mrope_fallback_takes_two_images
 decoder   a GPU image decoder is rejected
           -> test_gpu_image_decoder_is_rejected
 trainer   the strategy module imports without serving modules
@@ -193,6 +195,20 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
             legacy, [1, IMAGE, 2, 1, IMAGE], self.images[:2]
         )
         self.assert_same_media(second_turn, legacy_output)
+
+    def test_scheduler_mrope_fallback_takes_two_images(self):
+        """The scheduler asks a request without M-RoPE positions for them; with two
+        images, rebuilding the int n_vit_h / n_vit_w crashed the scheduler."""
+        _, served = self._processors()
+        output = asyncio.run(
+            served.process_mm_data_async(
+                image_data=self.images[:2], input_text=[IMAGE, 1, IMAGE]
+            )
+        )
+        self.assertEqual(
+            served.compute_mrope_positions(output.input_ids, output.mm_items),
+            (None, None),
+        )
 
     def test_gpu_image_decoder_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "image_decoder must be 'pil'"):

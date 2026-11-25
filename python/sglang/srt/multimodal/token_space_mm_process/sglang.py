@@ -27,6 +27,9 @@ from sglang.srt.multimodal.serving_preprocessing import (
     resolve_auto_mm_processor_worker_num,
     resolve_hf_image_token_counts,
 )
+from sglang.srt.multimodal.token_space_mm_process.process_strategy import (
+    TokenSpaceProcessStrategy,
+)
 from sglang.srt.multimodal.token_space_mm_process.processor import (
     TokenSpaceProcessor,
 )
@@ -316,6 +319,13 @@ class TokenSpaceSGLangProcessor:
         # TODO(rockdu): Corner case: requests that arrive without M-RoPE positions.
         # Check whether every frontend can send positions, so this fallback can be removed.
         strategy = self._core.strategy
+        # Without M-RoPE there is nothing to rebuild, as in legacy's base method; and
+        # int item fields such as DeepSeek-V4.1's n_vit_h would not concatenate.
+        if (
+            type(strategy).compute_mrope_positions
+            is TokenSpaceProcessStrategy.compute_mrope_positions
+        ):
+            return None, None
         item_fields = {
             name: modality
             for name, modality in strategy.mm_item_fields.items()
