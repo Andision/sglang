@@ -1,17 +1,18 @@
 """CPU parity of the DeepSeek-V4.1 token-space strategy with the legacy processor; no weights.
 
-serving   served output == legacy PIL backend: IDs, items, offsets, patches, grids;
-          PNG, JPEG and RGBA, an exact, padded, stretched, upscaled and token-capped
-          resize, and two adjacent images
+serving   the flag selects this strategy for the checkpoint's architecture; served output
+          == legacy PIL backend: IDs, items, offsets, patches, grids, mm_tokens; PNG, JPEG
+          and RGBA, an exact, padded, upscaled, stretched and token-capped resize, and two
+          adjacent images; the trainer's output holds model inputs and the legacy spans
           -> test_serving_output_matches_legacy_processor
 hashes    transposed solid images have equal patches, but their grids and spans differ
           -> test_transposed_images_get_different_hashes
 turns     a later turn adds one image behind the expanded prefix
           -> test_partial_expansion_adds_the_new_turns_image
-mrope     the scheduler's M-RoPE fallback returns none for two images instead of crashing
+mrope     the scheduler's M-RoPE fallback returns none for two images
           -> test_scheduler_mrope_fallback_takes_two_images
-decoder   a GPU image decoder is rejected
-          -> test_gpu_image_decoder_is_rejected
+media     video and audio are request errors; a GPU image decoder is rejected
+          -> test_video_and_audio_are_rejected, test_gpu_image_decoder_is_rejected
 trainer   the strategy module imports without serving modules
           -> test_strategy_imports_without_serving_modules
 """
@@ -31,13 +32,14 @@ from transformers import PreTrainedTokenizerFast
 
 from sglang.srt.configs.deepseek_v41 import DeepseekV41Config
 from sglang.srt.managers.io_struct import GenerateReqInput
+from sglang.srt.managers.multimodal_processor import get_mm_processor
 from sglang.srt.multimodal.processors.deepseek_v41 import DeepseekV41ImageProcessor
 from sglang.srt.multimodal.token_space_mm_process.models.deepseek_v41 import (
     DeepseekV41TokenSpaceProcessStrategy,
     DeepseekV41TokenSpaceServingSpec,
 )
-from sglang.srt.multimodal.token_space_mm_process.sglang import (
-    TokenSpaceSGLangProcessor,
+from sglang.srt.multimodal.token_space_mm_process.registry import (
+    register_token_space_models,
 )
 from sglang.srt.runtime_context import publish, reset_context
 from sglang.srt.server_args import ServerArgs
@@ -46,13 +48,10 @@ from sglang.test.test_utils import CustomTestCase
 
 register_cpu_ci(est_time=8, suite="base-a-test-cpu")
 
-ARCH = "DeepseekV4ForCausalLM"
+# The checkpoint's spelling; DeepseekV41Config normalizes it to DeepseekV4ForCausalLM.
+ARCH = "DeepseekV41ForCausalLM"
 IMAGE = 129264
 VOCAB = {"[UNK]": 0, "hi": 1, "there": 2, "<image>": IMAGE}
-
-DeepseekTokenSpaceProcessor = TokenSpaceSGLangProcessor.for_strategy_and_serving_spec(
-    DeepseekV41TokenSpaceProcessStrategy, DeepseekV41TokenSpaceServingSpec
-)
 
 
 def _tokenizer():
@@ -66,6 +65,7 @@ def _config():
     # 4 px patches in 8 px token cells keep the grids small; each resize depends on ratios only.
     return DeepseekV41Config(
         architectures=[ARCH],
+        vision_n_layers=1,
         image_token_id=IMAGE,
         vision_patch_size=4,
         vision_downsample_ratio=2,
@@ -108,8 +108,9 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
             _image(16, 16, 1, "PNG"),
             _image(24, 10, 2, "JPEG"),
             _image(20, 20, 3, "PNG", mode="RGBA"),
-            _image(64, 8, 4, "PNG"),
-            _image(80, 60, 5, "PNG"),
+            _image(8, 8, 4, "PNG"),
+            _image(64, 8, 5, "PNG"),
+            _image(80, 60, 6, "PNG"),
         ]
 
     def _processors(self):
@@ -118,9 +119,8 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
             _config(), self.server_args, self.tokenizer, None
         )
         self.addCleanup(legacy.shutdown)
-        served = DeepseekTokenSpaceProcessor(
-            _config(), self.server_args, self.tokenizer, None
-        )
+        register_token_space_models()
+        served = get_mm_processor(_config(), self.server_args, self.tokenizer, None)
         self.addCleanup(served.shutdown)
         return legacy, served
 
@@ -148,16 +148,32 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
             )
 
     def test_serving_output_matches_legacy_processor(self):
-        """An exact, a padded, an RGBA, a stretched and a token-capped image; the last two adjacent."""
+        """An exact, a padded, an RGBA, an upscaled, a stretched and a token-capped image; the last two adjacent."""
         legacy, served = self._processors()
-        input_ids = [1, IMAGE, 2, IMAGE, 1, IMAGE, 2, IMAGE, IMAGE]
+        self.assertIs(type(served._core.strategy), DeepseekV41TokenSpaceProcessStrategy)
+        self.assertIs(type(served._serving_spec), DeepseekV41TokenSpaceServingSpec)
+        # /v1/decisions validates image markers through mm_tokens.
+        self.assertEqual(vars(served.mm_tokens), vars(legacy.mm_tokens))
+        input_ids = [1, IMAGE, 2, IMAGE, 1, IMAGE, 2, IMAGE, 1, IMAGE, IMAGE]
 
         served_output = asyncio.run(
             served.process_mm_data_async(image_data=self.images, input_text=input_ids)
         )
         legacy_output = self._legacy_output(legacy, input_ids, self.images)
+        trainer_output = asyncio.run(
+            served._core.process(self.images, input_ids=input_ids)
+        )
 
         self.assert_same_media(served_output, legacy_output)
+        # A trainer gets model inputs only, and each image's legacy span, half-open.
+        self.assertNotIn("num_image_tokens", trainer_output)
+        self.assertEqual(
+            trainer_output["mm_spans"],
+            [
+                [(start, end + 1) for start, end in item.offsets]
+                for item in legacy_output.mm_items
+            ],
+        )
 
     def test_transposed_images_get_different_hashes(self):
         """A solid 32x16 and 16x32 image have equal patches but spans of 12 and 14 tokens."""
@@ -197,8 +213,8 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
         self.assert_same_media(second_turn, legacy_output)
 
     def test_scheduler_mrope_fallback_takes_two_images(self):
-        """The scheduler asks a request without M-RoPE positions for them; with two
-        images, rebuilding the int n_vit_h / n_vit_w crashed the scheduler."""
+        """The scheduler asks every request without M-RoPE positions for them;
+        a model without M-RoPE must answer none for two images, not raise."""
         _, served = self._processors()
         output = asyncio.run(
             served.process_mm_data_async(
@@ -209,6 +225,20 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
             served.compute_mrope_positions(output.input_ids, output.mm_items),
             (None, None),
         )
+
+    def test_video_and_audio_are_rejected(self):
+        """Legacy reads images only; other media must be a request error, not a server error."""
+        _, served = self._processors()
+        for media in ({"video_data": [b"\x00"]}, {"audio_data": [b"\x00"]}):
+            with (
+                self.subTest(media=list(media)),
+                self.assertRaisesRegex(ValueError, "image input only"),
+            ):
+                asyncio.run(
+                    served.process_mm_data_async(
+                        image_data=self.images[:1], input_text=[1, IMAGE], **media
+                    )
+                )
 
     def test_gpu_image_decoder_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "image_decoder must be 'pil'"):

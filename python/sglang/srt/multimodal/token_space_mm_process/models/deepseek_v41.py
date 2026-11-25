@@ -43,9 +43,17 @@ class DeepseekV41TokenSpaceProcessStrategy(TokenSpaceProcessStrategy):
         super().__init__(hf_config, processor, mm_process_config=mm_process_config)
         if self.gpu_image_decode:
             raise ValueError(
-                "DeepSeek-V4.1 patchifies PIL images, so image_decoder must be 'pil'"
+                "mm_process_config image_decoder must be 'pil' for DeepSeek-V4.1, "
+                "which patchifies PIL images"
             )
         self.mm_token_expansion_params = {"image_token_id": hf_config.image_token_id}
+
+    # Legacy loads images only; reject other media before decoding it.
+    def load_video(self, source, *, video_decode_device):
+        raise ValueError("DeepSeek-V4.1 takes image input only, not video")
+
+    def load_audio(self, source):
+        raise ValueError("DeepSeek-V4.1 takes image input only, not audio")
 
     def process_image(self, image, processor, preprocess_kwargs, **kwargs):
         patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = patchify_image(

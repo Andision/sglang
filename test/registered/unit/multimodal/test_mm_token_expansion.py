@@ -643,7 +643,7 @@ _MODEL_TYPES_BY_ARCH = {
     "Qwen3OmniMoeForConditionalGeneration": ("qwen3_omni_moe",),
     "Qwen4ExpForConditionalGeneration": ("qwen4_exp",),
     "InklingForConditionalGeneration": ("inkling_mm_model",),
-    "DeepseekV4ForCausalLM": ("deepseek_v4", "deepseek_v41"),
+    "DeepseekV4ForCausalLM": ("deepseek_v41",),
 }
 
 
@@ -653,7 +653,12 @@ class TestTokenSpaceSGLangProcessor(unittest.TestCase):
         except the alpha compositing `_STRATEGY_RGB_CONVERSION` records for it."""
         reset_context()
         self.addCleanup(reset_context)
-        publish(ServerArgs(model_path="dummy", model_impl="sglang"), role="test")
+        publish(
+            ServerArgs(
+                model_path="dummy", model_impl="sglang", image_processor_backend="pil"
+            ),
+            role="test",
+        )
         import_processors("sglang.srt.multimodal.processors")
         register_token_space_models()
         legacy = {
