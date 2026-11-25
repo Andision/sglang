@@ -23,6 +23,7 @@ import io
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 import msgspec
 import numpy as np
@@ -40,6 +41,8 @@ from sglang.srt.multimodal.token_space_mm_process.models.deepseek_v41 import (
     DeepseekV41TokenSpaceServingSpec,
 )
 from sglang.srt.multimodal.token_space_mm_process.registry import (
+    TOKEN_SPACE_SERVING_SPEC_MAPPING,
+    TOKEN_SPACE_STRATEGY_MAPPING,
     register_token_space_models,
 )
 from sglang.srt.runtime_context import publish, reset_context
@@ -120,6 +123,11 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
             _config(), self.server_args, self.tokenizer, None
         )
         self.addCleanup(legacy.shutdown)
+        # Serving's own discovery, undone afterwards so later tests see the registries as before.
+        for mapping in (TOKEN_SPACE_STRATEGY_MAPPING, TOKEN_SPACE_SERVING_SPEC_MAPPING):
+            registry = patch.dict(mapping)
+            registry.start()
+            self.addCleanup(registry.stop)
         register_token_space_models()
         served = get_mm_processor(_config(), self.server_args, self.tokenizer, None)
         self.addCleanup(served.shutdown)
@@ -136,9 +144,8 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
 
     def assert_same_media(self, served, legacy):
         fields, legacy_fields = (msgspec.structs.asdict(o) for o in (served, legacy))
-        # Items are compared below; padded IDs carry each route's own pad values.
-        for output_fields in (fields, legacy_fields):
-            output_fields.pop("mm_items"), output_fields.pop("padded_input_ids")
+        # Items are compared one by one below.
+        del fields["mm_items"], legacy_fields["mm_items"]
         self.assertEqual(fields, legacy_fields)
         self.assertEqual(len(served.mm_items), len(legacy.mm_items))
         for item, reference in zip(served.mm_items, legacy.mm_items):

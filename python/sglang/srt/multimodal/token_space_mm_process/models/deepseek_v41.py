@@ -21,6 +21,9 @@ from sglang.srt.multimodal.token_space_mm_process.serving_spec import (
     TokenSpaceServingSpec,
 )
 
+# Per-image token counts the expansion reads; not a model input.
+_NUM_IMAGE_TOKENS = "num_image_tokens"
+
 
 class DeepseekV41TokenSpaceProcessStrategy(TokenSpaceProcessStrategy):
     """ViT patches and grids, from the legacy processor's PIL backend."""
@@ -63,15 +66,14 @@ class DeepseekV41TokenSpaceProcessStrategy(TokenSpaceProcessStrategy):
             "pixel_values": patches,
             "n_vit_h": torch.tensor([n_vit_h]),
             "n_vit_w": torch.tensor([n_vit_w]),
-            # Read by the expansion; not a model input.
-            "num_image_tokens": [num_image_tokens(n_llm_h=n_llm_h, n_llm_w=n_llm_w)],
+            _NUM_IMAGE_TOKENS: [num_image_tokens(n_llm_h=n_llm_h, n_llm_w=n_llm_w)],
         }
 
     def build_processor_output(self, media_features, input_ids, *, processor):
         output = super().build_processor_output(
             media_features, input_ids, processor=processor
         )
-        output.pop("num_image_tokens", None)
+        output.pop(_NUM_IMAGE_TOKENS, None)
         return output
 
     # Adapted from DeepseekV41ImageProcessor.process_mm_data_async;
@@ -81,7 +83,7 @@ class DeepseekV41TokenSpaceProcessStrategy(TokenSpaceProcessStrategy):
         return {
             image_token_id: [
                 [image_token_id] * count
-                for count in media_features.get("num_image_tokens", [])
+                for count in media_features.get(_NUM_IMAGE_TOKENS, [])
             ]
         }
 
@@ -107,9 +109,11 @@ class DeepseekV41TokenSpaceServingSpec(TokenSpaceServingSpec):
 
         split = []
         for item in mm_items:
-            grids = list(zip(item.n_vit_h.tolist(), item.n_vit_w.tolist()))
+            grids = list(zip(item.n_vit_h.tolist(), item.n_vit_w.tolist(), strict=True))
             features = item.feature.split([h * w for h, w in grids])
-            for offsets, feature, (h, w) in zip(item.offsets, features, grids):
+            for offsets, feature, (h, w) in zip(
+                item.offsets, features, grids, strict=True
+            ):
                 split.append(
                     MultimodalDataItem(
                         modality=item.modality,
