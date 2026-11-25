@@ -653,6 +653,8 @@ class TestTokenSpaceSGLangProcessor(unittest.TestCase):
         except the alpha compositing `_STRATEGY_RGB_CONVERSION` records for it."""
         reset_context()
         self.addCleanup(reset_context)
+        # Legacy V4.1 reads the image backend before the shared base; pil keeps it off
+        # the Rust extension.
         publish(
             ServerArgs(
                 model_path="dummy", model_impl="sglang", image_processor_backend="pil"

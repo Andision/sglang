@@ -1,9 +1,10 @@
 """CPU parity of the DeepSeek-V4.1 token-space strategy with the legacy processor; no weights.
 
 serving   the flag selects this strategy for the checkpoint's architecture; served output
-          == legacy PIL backend: IDs, items, offsets, patches, grids, mm_tokens; PNG, JPEG
-          and RGBA, an exact, padded, upscaled, stretched and token-capped resize, and two
-          adjacent images; the trainer's output holds model inputs and the legacy spans
+          == legacy PIL backend: every output field, and items, offsets, patches, grids,
+          per-item storage, mm_tokens; PNG, JPEG and RGBA, an exact, padded, upscaled,
+          stretched and token-capped resize, and two adjacent images; the trainer's output
+          holds model inputs and the legacy spans
           -> test_serving_output_matches_legacy_processor
 hashes    transposed solid images have equal patches, but their grids and spans differ
           -> test_transposed_images_get_different_hashes
@@ -134,21 +135,28 @@ class TestDeepseekV41TokenSpace(CustomTestCase):
         )
 
     def assert_same_media(self, served, legacy):
-        self.assertEqual(served.input_ids, legacy.input_ids)
-        self.assertEqual(served.im_token_id, legacy.im_token_id)
+        fields, legacy_fields = (msgspec.structs.asdict(o) for o in (served, legacy))
+        # Items are compared below; padded IDs carry each route's own pad values.
+        for output_fields in (fields, legacy_fields):
+            output_fields.pop("mm_items"), output_fields.pop("padded_input_ids")
+        self.assertEqual(fields, legacy_fields)
         self.assertEqual(len(served.mm_items), len(legacy.mm_items))
         for item, reference in zip(served.mm_items, legacy.mm_items):
             self.assertEqual(item.modality, reference.modality)
             self.assertEqual(item.offsets, reference.offsets)
             self.assertEqual(item.feature.dtype, reference.feature.dtype)
             self.assertTrue(torch.equal(item.feature, reference.feature))
+            # Inline IPC pickles a tensor's whole storage, so each item owns its own.
+            self.assertEqual(
+                item.feature.untyped_storage().nbytes(), item.feature.nbytes
+            )
             item, reference = (msgspec.structs.asdict(i) for i in (item, reference))
             self.assertEqual(
                 item["model_specific_data"], reference["model_specific_data"]
             )
 
     def test_serving_output_matches_legacy_processor(self):
-        """An exact, a padded, an RGBA, an upscaled, a stretched and a token-capped image; the last two adjacent."""
+        """Exact, padded, RGBA, upscaled, stretched and token-capped images; the last two adjacent."""
         legacy, served = self._processors()
         self.assertIs(type(served._core.strategy), DeepseekV41TokenSpaceProcessStrategy)
         self.assertIs(type(served._serving_spec), DeepseekV41TokenSpaceServingSpec)

@@ -321,12 +321,12 @@ class TokenSpaceSGLangProcessor:
         Only the scheduler's fallback calls this. It rebuilds the processor output's
         media fields from each item's strategy fields.
         """
-        # TODO(rockdu): Corner case: requests that arrive without M-RoPE positions.
-        # Check whether every frontend can send positions, so this fallback can be removed.
-        # Nothing to rebuild without M-RoPE, as in the legacy base method; scalar item
-        # fields would not concatenate.
+        # Nothing to rebuild without M-RoPE, as in the legacy base method;
+        # scalar item fields would not concatenate.
         if not self._strategy_has_mrope:
             return None, None
+        # TODO(rockdu): Corner case: requests that arrive without M-RoPE positions.
+        # Check whether every frontend can send positions, so this fallback can be removed.
         strategy = self._core.strategy
         item_fields = {
             name: modality

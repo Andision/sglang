@@ -57,14 +57,14 @@ class DeepseekV41TokenSpaceProcessStrategy(TokenSpaceProcessStrategy):
 
     def process_image(self, image, processor, preprocess_kwargs, **kwargs):
         patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = patchify_image(
-            image, self.hf_config
+            image=image, args=self.hf_config
         )
         return {
             "pixel_values": patches,
             "n_vit_h": torch.tensor([n_vit_h]),
             "n_vit_w": torch.tensor([n_vit_w]),
             # Read by the expansion; not a model input.
-            "num_image_tokens": [num_image_tokens(n_llm_h, n_llm_w)],
+            "num_image_tokens": [num_image_tokens(n_llm_h=n_llm_h, n_llm_w=n_llm_w)],
         }
 
     def build_processor_output(self, media_features, input_ids, *, processor):
@@ -74,8 +74,8 @@ class DeepseekV41TokenSpaceProcessStrategy(TokenSpaceProcessStrategy):
         output.pop("num_image_tokens", None)
         return output
 
-    # Adapted from DeepseekV41ImageProcessor.process_mm_data_async: each placeholder becomes
-    # a run of itself, one token per position of the image's span.
+    # Adapted from DeepseekV41ImageProcessor.process_mm_data_async;
+    # each placeholder becomes a run of itself, one token per position of the image's span.
     def get_mm_token_expansion_spec(self, media_features, *, encode_expansion_text):
         image_token_id = self.mm_token_expansion_params["image_token_id"]
         return {
@@ -113,7 +113,8 @@ class DeepseekV41TokenSpaceServingSpec(TokenSpaceServingSpec):
                 split.append(
                     MultimodalDataItem(
                         modality=item.modality,
-                        feature=feature,
+                        # Own storage, as legacy: a view would pickle the whole batch.
+                        feature=feature.clone(),
                         offsets=[offsets],
                         model_specific_data={"n_vit_h": h, "n_vit_w": w},
                     )
